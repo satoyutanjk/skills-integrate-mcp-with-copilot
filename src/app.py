@@ -5,19 +5,51 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 import os
+import json
 from pathlib import Path
+from typing import Optional
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+
+# Add CORS middleware to allow credentials
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Load teachers from JSON file
+def load_teachers():
+    teachers_file = current_dir / "teachers.json"
+    with open(teachers_file, 'r') as f:
+        data = json.load(f)
+        return data['teachers']
+
+# Simple session storage (in production, use a proper session management system)
+sessions = {}
+
+def verify_teacher_session(authorization: Optional[str] = Header(None)):
+    """Verify if the request has a valid teacher session"""
+    if not authorization:
+        return False
+    
+    # Remove 'Bearer ' prefix if present
+    token = authorization.replace('Bearer ', '') if authorization.startswith('Bearer ') else authorization
+    
+    return token in sessions and sessions[token] == 'teacher'
 
 # In-memory activity database
 activities = {
@@ -83,14 +115,52 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+@app.post("/login")
+def login(username: str, password: str):
+    """Authenticate a teacher and create a session"""
+    teachers = load_teachers()
+    
+    # Check if credentials are valid
+    for teacher in teachers:
+        if teacher['username'] == username and teacher['password'] == password:
+            # Create a simple session token (in production, use proper JWT or secure tokens)
+            import secrets
+            token = secrets.token_hex(16)
+            sessions[token] = 'teacher'
+            return {"token": token, "message": "Login successful"}
+    
+    raise HTTPException(status_code=401, detail="Invalid username or password")
+
+
+@app.post("/logout")
+def logout(authorization: Optional[str] = Header(None)):
+    """Logout a teacher and invalidate the session"""
+    if authorization:
+        token = authorization.replace('Bearer ', '') if authorization.startswith('Bearer ') else authorization
+        if token in sessions:
+            del sessions[token]
+    return {"message": "Logout successful"}
+
+
+@app.get("/verify-session")
+def verify_session(authorization: Optional[str] = Header(None)):
+    """Check if the current session is valid"""
+    is_valid = verify_teacher_session(authorization)
+    return {"authenticated": is_valid}
+
+
 @app.get("/activities")
 def get_activities():
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+def signup_for_activity(activity_name: str, email: str, authorization: Optional[str] = Header(None)):
+    """Sign up a student for an activity - requires teacher authentication"""
+    # Check if user is authenticated as a teacher
+    if not verify_teacher_session(authorization):
+        raise HTTPException(status_code=403, detail="Only teachers can register students")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +181,12 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str, authorization: Optional[str] = Header(None)):
+    """Unregister a student from an activity - requires teacher authentication"""
+    # Check if user is authenticated as a teacher
+    if not verify_teacher_session(authorization):
+        raise HTTPException(status_code=403, detail="Only teachers can unregister students")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
